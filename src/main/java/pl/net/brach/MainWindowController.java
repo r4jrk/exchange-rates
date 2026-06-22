@@ -9,6 +9,7 @@ import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.util.*;
+import javafx.concurrent.Task;
 import javafx.fxml.FXML;
 import javafx.fxml.Initializable;
 import javafx.scene.control.Button;
@@ -18,8 +19,17 @@ import javafx.scene.control.RadioButton;
 import javafx.scene.control.TextField;
 import javafx.scene.input.KeyCode;
 import javafx.scene.input.KeyEvent;
+import javafx.scene.layout.StackPane;
 import javafx.stage.Stage;
 import javafx.util.StringConverter;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import pl.net.brach.commons.data.CurrencyRepository;
+import pl.net.brach.commons.data.VatRepository;
+import pl.net.brach.commons.nbp.NbpClient;
+import pl.net.brach.commons.nbp.NbpRate;
+import pl.net.brach.commons.ui.Dialogs;
+import pl.net.brach.commons.ui.R4TechBannerView;
 import javax.print.*;
 import javax.print.attribute.*;
 import javax.print.attribute.standard.*;
@@ -31,9 +41,9 @@ public class MainWindowController implements Initializable {
 
     private static final String[] ACCOUNTING_TYPES = {"W walucie", "W PLN"};
 
-    private static final String NBP_API_LINK = "http://api.nbp.pl/api/exchangerates/rates/a/";
-    private static final int NBP_API_RETRY_COUNT = 30;
-    private static final DateTimeFormatter NBP_API_DATA_FORMAT = DateTimeFormatter.ofPattern("yyyy-MM-dd", Locale.ENGLISH);
+    private static final Logger log = LoggerFactory.getLogger(MainWindowController.class);
+
+    private final NbpClient nbpClient = new NbpClient();
 
     @FXML
     private Button bClose;
@@ -51,9 +61,13 @@ public class MainWindowController implements Initializable {
     private ComboBox<String> cbVAT;
     @FXML
     private ComboBox<String> cbAccountingType;
+    @FXML
+    private StackPane bannerContainer;
 
     @Override
     public void initialize(URL url, ResourceBundle rb) {
+        bannerContainer.getChildren().add(new R4TechBannerView());
+
         addCurrenciesToComboBox();
         addVATRatesToComboBox();
         addAccountingTypesToComboBox();
@@ -76,10 +90,9 @@ public class MainWindowController implements Initializable {
         });
 
         dpTransactionDate.getEditor().textProperty().addListener((observable, oldValue, newValue) -> {
-            if (!newValue.matches(".{11}")) {
-                dpTransactionDate.getEditor().setText(newValue.replaceAll("[^0-9,-\\/]{10}", ""));
-            } else {
-                dpTransactionDate.getEditor().setText("");
+            if (newValue.length() > 10) {
+                // Cap at a full date (dd-MM-yyyy) instead of wiping the whole field.
+                dpTransactionDate.getEditor().setText(newValue.substring(0, 10));
             }
         });
 
@@ -123,18 +136,18 @@ public class MainWindowController implements Initializable {
     }
 
     private void addCurrenciesToComboBox() {
-        Currency currency = new Currency();
+        CurrencyRepository currencyRepository = new CurrencyRepository();
 
         cbCurrencies.getItems().clear();
-        cbCurrencies.getItems().addAll(currency.getCurrencies());
+        cbCurrencies.getItems().addAll(currencyRepository.getCurrencies());
         cbCurrencies.getSelectionModel().selectFirst();
     }
 
     private void addVATRatesToComboBox() {
-        VAT vat = new VAT();
+        VatRepository vatRepository = new VatRepository();
 
         cbVAT.getItems().clear();
-        cbVAT.getItems().addAll(vat.getVatRates());
+        cbVAT.getItems().addAll(vatRepository.getVatRates());
         cbVAT.getSelectionModel().selectFirst();
     }
 
@@ -158,46 +171,69 @@ public class MainWindowController implements Initializable {
         cbAccountingType.getSelectionModel().select(cbAccountingType.getSelectionModel().getSelectedItem());}
 
     @FXML
-    private void okClicked() throws IOException {
+    private void okClicked() {
         //Get user input data
         if (dpTransactionDate.getEditor().getText().isEmpty()) {
             System.out.println("No data was provided. Aborting...");
+            return;
+        }
+
+        // Capture inputs on the FX thread; only the network call runs in the background.
+        final LocalDate dTransactionDate = extractTransactionDate();
+        final String currency = cbCurrencies.getValue();
+
+        Task<NbpRate> fetchRate = new Task<>() {
+            @Override
+            protected NbpRate call() throws Exception {
+                return nbpClient.fetchRatePrecedingDate(currency, dTransactionDate);
+            }
+        };
+
+        fetchRate.setOnSucceeded(event -> showResult(fetchRate.getValue()));
+        fetchRate.setOnFailed(event -> {
+            log.error("Nie udało się pobrać kursu z NBP", fetchRate.getException());
+            Dialogs.error("Nie udało się pobrać kursu z NBP",
+                    "Sprawdź połączenie z internetem i spróbuj ponownie.");
+        });
+
+        Thread worker = new Thread(fetchRate, "nbp-fetch");
+        worker.setDaemon(true);
+        worker.start();
+    }
+
+    /** Runs on the FX thread (Task onSucceeded): builds the summary params, optionally prints, and shows the summary. */
+    private void showResult(NbpRate rate) {
+        String rateText = rate.midPlain();
+        double calculatedTransactionNetValue = calculateNetAmount(rateText);
+
+        String[] params;
+        DecimalFormat format = new DecimalFormat("###,##0.00");
+
+        if (rbVAT.isSelected()) {
+            double calculatedTransactionVatValue = calculateVatAmount(rateText);
+            params = new String[6];
+            params[5] = format.format(calculatedTransactionVatValue) + " zł";
         } else {
-            LocalDate dTransactionDate = extractTransactionDate();
+            params = new String[5];
+        }
 
-            String fetchedTransactionData = getData(dTransactionDate, cbCurrencies.getValue());
+        params[0] = format.format(Double.parseDouble(tbTransactionAmount.getText().replace(",", ".")))
+                + " " + cbCurrencies.getValue();
+        params[1] = rate.tableNumber();
+        params[2] = rate.effectiveDate().toString();
+        params[3] = rateText.replace(".", ",");
+        params[4] = format.format(calculatedTransactionNetValue) + " zł";
 
-            String transactionExchangeRatesTableNumber = getTableNumber(fetchedTransactionData);
-            String transactionExchangeRatesTableDate = gateDate(fetchedTransactionData);
-            String transactionExchangeRatesTransactionRate = getRate(fetchedTransactionData);
-            double calculatedTransactionNetValue = calculateNetAmount(transactionExchangeRatesTransactionRate);
+        if (rbPrint.isSelected()) {
+            ArrayList<String> labelText = generateLabel(params);
+            printLabel(labelText);
+        }
 
-            String[] params;
-
-            DecimalFormat format = new DecimalFormat("###,##0.00");
-
-            if (rbVAT.isSelected()) {
-                double calculatedTransactionVatValue = calculateVatAmount(transactionExchangeRatesTransactionRate);
-
-                params = new String[6];
-                params[5] = format.format(calculatedTransactionVatValue) + " zł";
-            } else {
-                params = new String[5];
-            }
-
-            params[0] = format.format(Double.parseDouble(tbTransactionAmount.getText().replace(",", ".")))
-                    + " " + cbCurrencies.getValue();
-            params[1] = transactionExchangeRatesTableNumber;
-            params[2] = transactionExchangeRatesTableDate;
-            params[3] = transactionExchangeRatesTransactionRate.replace(".", ",");
-            params[4] = format.format(calculatedTransactionNetValue) + " zł";
-
-            if (rbPrint.isSelected()) {
-                ArrayList<String> labelText = generateLabel(params);
-                printLabel(labelText);
-            }
-
+        try {
             ExchangeRates.displaySummary(params);
+        } catch (IOException e) {
+            log.error("Nie udało się otworzyć podsumowania", e);
+            Dialogs.error("Błąd", "Nie udało się otworzyć okna podsumowania.");
         }
     }
 
@@ -209,62 +245,6 @@ public class MainWindowController implements Initializable {
             } catch (DateTimeParseException ignored) { }
         }
         return dTransactionDate;
-    }
-
-    private String getData(LocalDate dData, String sCurrencyInput) throws IOException {
-        String dataFetched = "";
-
-        boolean retry = true;
-
-        int loopCount = 0;
-
-        while (retry) {
-            //Get the data from NBP API
-            try {
-                dData = dData.minusDays(1);
-                String formattedDate = dData.format(NBP_API_DATA_FORMAT);
-
-                URL nbpApiUrl = new URL(NBP_API_LINK + sCurrencyInput + "/" + formattedDate + "/?format=json");
-
-                try (BufferedReader in = new BufferedReader(new InputStreamReader(nbpApiUrl.openStream()))) {
-                    dataFetched = in.readLine();
-                }
-
-                return dataFetched;
-            } catch (FileNotFoundException ex) {
-                if (loopCount > NBP_API_RETRY_COUNT) {
-                    System.out.println("Retry count exceeded");
-                    retry = false;
-                }
-                loopCount++;
-            }
-        }
-        return dataFetched;
-    }
-
-    private static String getTableNumber(String sData) {
-        //VERY dirty workaround for NOKs ONLY. That whole stuff (fetching data, etc.) should be rebuilt to handle JSONs properly
-        if (sData.indexOf("no") == 32) {
-            return sData.substring(sData.indexOf("no") + 39, sData.indexOf("[") + 22);
-        } else {
-            return sData.substring(sData.indexOf("no") + 5, sData.indexOf("[") + 22);
-        }
-    }
-
-    private static String gateDate(String sData) {
-        return sData.substring(sData.indexOf("effectiveDate") + 16, sData.indexOf("[") + 51);
-    }
-
-    private String getRate(String sData) {
-        //Check if the currency is not in 1/100 PLN and adjust if necessary
-        String sRate = sData.substring(sData.indexOf("mid") + 5, sData.indexOf("[") + 67);
-        if (sRate.charAt(sRate.length() - 1) == ']') {
-            sRate = sRate.substring(0, sRate.length() - 1);
-        }
-        if (sRate.charAt(sRate.length() - 1) == '}') {
-            sRate = sRate.substring(0, sRate.length() - 1);
-        }
-        return sRate;
     }
 
     private double calculateNetAmount(String sRate) {
@@ -327,39 +307,30 @@ public class MainWindowController implements Initializable {
         pras.add(new MediaPrintableArea(0, 0, LabelPrint.PRINT_PAGE_HEIGHT, LabelPrint.PRINT_PAGE_WIDTH, MediaPrintableArea.MM));
         pras.add(new JobName(ExchangeRates.BRACHSOFT_TITLE + " - Dokument", null));
 
-        PrinterJob printerJob = PrinterJob.getPrinterJob();
-        String printServiceName = printerJob.getPrintService().getName();
-        boolean isSetPrintServiceSuccess = false;
-
-        try {
-            System.out.println("Trying to set print service to: " + ExchangeRates.PRIMARY_PRINTER_NAME);
-            printerJob.setPrintService(getPrintService(ExchangeRates.PRIMARY_PRINTER_NAME));
-            isSetPrintServiceSuccess = true;
-            System.out.println("Successfully set print service to: " + ExchangeRates.PRIMARY_PRINTER_NAME);
-        } catch (Exception ex) {
-            System.out.println("Failed to set print service to: " + ExchangeRates.PRIMARY_PRINTER_NAME);
+        // Prefer the primary label printer, fall back to the secondary; both may be absent.
+        PrintService printService = getPrintService(ExchangeRates.PRIMARY_PRINTER_NAME);
+        if (printService == null) {
+            printService = getPrintService(ExchangeRates.SECONDARY_PRINTER_NAME);
+        }
+        if (printService == null) {
+            log.warn("Nie znaleziono drukarki etykiet ({} ani {})",
+                    ExchangeRates.PRIMARY_PRINTER_NAME, ExchangeRates.SECONDARY_PRINTER_NAME);
+            Dialogs.error("Nie znaleziono drukarki",
+                    "Nie znaleziono drukarki etykiet: " + ExchangeRates.PRIMARY_PRINTER_NAME
+                            + " ani " + ExchangeRates.SECONDARY_PRINTER_NAME + ".");
+            return;
         }
 
         try {
-            System.out.println("Trying to set print service to: " + ExchangeRates.SECONDARY_PRINTER_NAME);
-            printerJob.setPrintService(getPrintService(ExchangeRates.SECONDARY_PRINTER_NAME));
-            isSetPrintServiceSuccess = true;
-            System.out.println("Successfully set print service to: " + ExchangeRates.SECONDARY_PRINTER_NAME);
+            PrinterJob printerJob = PrinterJob.getPrinterJob();
+            printerJob.setPrintService(printService);
+            printerJob.setPrintable(new LabelPrint(stringArrayListToPrint));
+            printerJob.print(pras);
+            log.info("Etykieta wysłana do drukarki: {}", printService.getName());
         } catch (Exception ex) {
-            System.out.println("Failed to set print service to: " + ExchangeRates.SECONDARY_PRINTER_NAME);
-        }
-
-        try {
-            if (isSetPrintServiceSuccess) {
-                printerJob.setPrintable(new LabelPrint(stringArrayListToPrint));
-                printerJob.print(pras);
-                System.out.println("Label sent to printer: " + printServiceName);
-            } else {
-                System.out.println("Failed to print label on: " + printServiceName);
-            }
-        } catch (Exception ex) {
-            System.out.println(ex);
-            System.out.println("Failed to print label on: " + printServiceName);
+            log.error("Nie udało się wydrukować etykiety na: {}", printService.getName(), ex);
+            Dialogs.error("Błąd drukowania",
+                    "Nie udało się wydrukować etykiety na drukarce: " + printService.getName() + ".");
         }
     }
 
