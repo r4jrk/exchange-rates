@@ -1,4 +1,4 @@
-package pl.net.brach;
+package net.r4tech;
 
 import java.io.*;
 import javafx.application.Application;
@@ -7,12 +7,13 @@ import javafx.scene.Parent;
 import javafx.scene.Scene;
 import javafx.scene.layout.Pane;
 import javafx.stage.Stage;
-import pl.net.brach.commons.ui.Branding;
+import net.r4tech.commons.ui.Branding;
 
 public class ExchangeRates extends Application {
 
-    static final String BRACHSOFT_TITLE = "r4_tech - Kursy walut v.1.3";
-    static final String STYLE_PATH = "pl/net/brach/style.css";
+    static final String R4_TECH_TITLE = "R4_TECH - Kursy walut v.1.4";
+    static final String STYLE_PATH = "net/r4tech/style.css";
+    static final String APP_ICON = "/net/r4tech/exchange-rates-icon.png";
 
     static final String PRIMARY_PRINTER_NAME = "Xprinter XP-350B";
     static final String SECONDARY_PRINTER_NAME = "Xprinter XP-420B";
@@ -29,8 +30,8 @@ public class ExchangeRates extends Application {
         Scene scene = new Scene(root);
         scene.getStylesheets().add(STYLE_PATH);
 
-        stage.setTitle(BRACHSOFT_TITLE);
-        Branding.applyIcon(stage);
+        stage.setTitle(R4_TECH_TITLE);
+        Branding.applyIcon(stage, APP_ICON, ExchangeRates.class);
         stage.setScene(scene);
         stage.setResizable(false);
         stage.show();
@@ -45,8 +46,8 @@ public class ExchangeRates extends Application {
 
         Stage stage = new Stage();
 
-        stage.setTitle(BRACHSOFT_TITLE + " - Podsumowanie");
-        Branding.applyIcon(stage);
+        stage.setTitle(R4_TECH_TITLE + " - Podsumowanie");
+        Branding.applyIcon(stage, APP_ICON, ExchangeRates.class);
         stage.setScene(scene);
         stage.setResizable(false);
 

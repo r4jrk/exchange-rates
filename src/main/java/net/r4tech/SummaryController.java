@@ -1,4 +1,4 @@
-package pl.net.brach;
+package net.r4tech;
 
 import java.net.URL;
 import java.time.LocalDate;
